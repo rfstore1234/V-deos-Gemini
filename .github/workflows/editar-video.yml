@@ -1,0 +1,222 @@
+name: Gerador de Video IA (Apenas Audio)
+
+on:
+  workflow_dispatch:
+    inputs:
+      arquivo_audio:
+        description: 'Nome do arquivo de áudio no repositório (ex: voz.mp3)'
+        required: true
+        default: 'voz.mp3'
+      estilo_imagens:
+        description: 'Estilo visual das imagens geradas pela IA'
+        required: true
+        default: 'cinematic dark atmospheric illustration, dramatic lighting, ultra detailed, 8k'
+      volume_musica:
+        description: 'Volume da música de fundo gerada (0.10 = 10%, 0.15 = 15%)'
+        required: true
+        default: '0.15'
+      formato:
+        description: 'Formato do vídeo'
+        required: true
+        default: 'vertical_9_16'
+        type: choice
+        options:
+          - vertical_9_16
+          - horizontal_16_9
+
+permissions:
+  contents: write
+
+jobs:
+  criar-video-da-narracao:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar arquivos do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar FFmpeg, Fontes e Whisper IA
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-liberation
+          pip install -q openai-whisper requests
+
+      - name: Transcrever áudio, gerar imagens da história, música e vídeo
+        env:
+          AUDIO_INPUT: ${{ inputs.arquivo_audio }}
+          IMAGE_STYLE: ${{ inputs.estilo_imagens }}
+          MUSIC_VOL: ${{ inputs.volume_musica }}
+          VIDEO_FORMAT: ${{ inputs.formato }}
+        run: |
+          python3 - << 'EOF'
+          import os
+          import json
+          import subprocess
+          import urllib.parse
+          import requests
+          import whisper
+
+          audio_file = os.environ.get("AUDIO_INPUT", "voz.mp3")
+          style = os.environ.get("IMAGE_STYLE", "cinematic dark atmospheric, dramatic lighting")
+          music_vol = os.environ.get("MUSIC_VOL", "0.15")
+          v_format = os.environ.get("VIDEO_FORMAT", "vertical_9_16")
+
+          if not os.path.exists(audio_file):
+              raise FileNotFoundError(f"O arquivo '{audio_file}' não foi encontrado na raiz do repositório!")
+
+          width, height = (1080, 1920) if v_format == "vertical_9_16" else (1920, 1080)
+
+          # 1. Descobrir a duração exata do áudio
+          cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_file]
+          total_duration = float(subprocess.check_output(cmd_dur).decode().strip())
+          print(f"Duração total do áudio: {total_duration:.2f} segundos")
+
+          # 2. Transcrever o áudio com Whisper para obter os trechos e tempos
+          print("Transcrevendo áudio com IA...")
+          model = whisper.load_model("base")
+          result = model.transcribe(audio_file, language="pt")
+          segments = result.get("segments", [])
+
+          if not segments:
+              segments = [{"start": 0.0, "end": total_duration, "text": "História em andamento"}]
+
+          # 3. Criar o arquivo de legenda sincronizada (legenda.srt)
+          def format_srt_time(seconds):
+              hrs = int(seconds // 3600)
+              mins = int((seconds % 3600) // 60)
+              secs = int(seconds % 60)
+              millis = int((seconds - int(seconds)) * 1000)
+              return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
+
+          with open("legenda.srt", "w", encoding="utf-8") as srt_file:
+              for idx, seg in enumerate(segments, 1):
+                  start_t = format_srt_time(seg["start"])
+                  end_t = format_srt_time(seg["end"])
+                  text = seg["text"].strip()
+                  srt_file.write(f"{idx}\n{start_t} --> {end_t}\n{text}\n\n")
+
+          # 4. Agrupar trechos muito curtos (mínimo ~4 segundos por cena) para gerar imagens da história
+          scenes = []
+          current_scene = {"start": 0.0, "end": 0.0, "text": ""}
+
+          for i, seg in enumerate(segments):
+              if current_scene["text"] == "":
+                  current_scene["start"] = 0.0 if i == 0 else seg["start"]
+              current_scene["text"] += " " + seg["text"].strip()
+              current_scene["end"] = seg["end"]
+
+              if (current_scene["end"] - current_scene["start"] >= 4.0) or (i == len(segments) - 1):
+                  scenes.append(current_scene.copy())
+                  current_scene = {"start": 0.0, "end": 0.0, "text": ""}
+
+          # Ajustar emendas de tempo para cobrir 100% do áudio sem buracos
+          for i in range(len(scenes)):
+              if i == 0:
+                  scenes[i]["start"] = 0.0
+              if i < len(scenes) - 1:
+                  scenes[i]["end"] = scenes[i + 1]["start"]
+              else:
+                  scenes[i]["end"] = total_duration
+
+          # 5. Gerar uma imagem por IA para cada cena da história e transformar em clipe
+          os.makedirs("cenas", exist_ok=True)
+          concat_list = []
+
+          for idx, scene in enumerate(scenes):
+              duration = max(0.5, scene["end"] - scene["start"])
+              prompt_text = f"{scene['text'].strip()}, {style}, no text, no words"
+              encoded_prompt = urllib.parse.quote(prompt_text)
+              img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={idx+100}&nologo=true"
+              img_path = f"cenas/img_{idx:03d}.jpg"
+              clip_path = f"cenas/clip_{idx:03d}.mp4"
+
+              print(f"Gerando imagem da cena {idx+1}/{len(scenes)}: {scene['text'].strip()[:50]}...")
+              img_downloaded = False
+              for tentativa in range(3):
+                  try:
+                      resp = requests.get(img_url, timeout=45)
+                      if resp.status_code == 200 and len(resp.content) > 1000:
+                          with open(img_path, "wb") as f:
+                              f.write(resp.content)
+                          img_downloaded = True
+                          break
+                  except Exception as e:
+                      print(f"Tentativa {tentativa+1} falhou: {e}")
+
+              # Caso o servidor de imagem oscile, gera um quadro escuro cinematográfico de segurança
+              if not img_downloaded:
+                  subprocess.run([
+                      "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x12131a:s={width}x{height}:d=1",
+                      "-frames:v", "1", img_path
+                  ], check=True)
+
+              # Criar clipe da cena com transição suave (fade-in)
+              subprocess.run([
+                  "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+                  "-t", f"{duration:.3f}",
+                  "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fade=t=in:st=0:d=0.4,format=yuv420p",
+                  "-r", "25", "-c:v", "libx264", "-preset", "fast", "-crf", "22", clip_path
+              ], check=True)
+              concat_list.append(f"file '{clip_path}'")
+
+          with open("lista_cenas.txt", "w") as f:
+              f.write("\n".join(concat_list))
+
+          # 6. Unir todos os clipes de imagem em uma única faixa de vídeo
+          subprocess.run([
+              "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "lista_cenas.txt",
+              "-c", "copy", "video_sem_audio.mp4"
+          ], check=True)
+
+          # 7. Gerar trilha musical ambiente original automaticamente (Acorde Am7 cinematográfico)
+          print("Compondo trilha musical ambiente original...")
+          subprocess.run([
+              "ffmpeg", "-y",
+              "-f", "lavfi", "-i", f"sine=frequency=110:duration={total_duration}",
+              "-f", "lavfi", "-i", f"sine=frequency=164.81:duration={total_duration}",
+              "-f", "lavfi", "-i", f"sine=frequency=220:duration={total_duration}",
+              "-f", "lavfi", "-i", f"sine=frequency=261.63:duration={total_duration}",
+              "-filter_complex", "[0:a][1:a][2:a][3:a]amix=inputs=4,lowpass=f=320,tremolo=f=0.4:d=0.35,aecho=0.8:0.88:60:0.4,afade=t=in:st=0:d=2,afade=t=out:st=" + str(max(0, total_duration-2.5)) + ":d=2.5",
+              "-c:a", "libmp3lame", "-q:a", "4", "musica_gerada.mp3"
+          ], check=True)
+
+          # 8. Queimar a legenda sincronizada e misturar Narração + Música Gerada
+          print("Renderizando vídeo final com legendas e mixagem de som...")
+          font_size = 16 if v_format == "vertical_9_16" else 20
+          margin_v = 65 if v_format == "vertical_9_16" else 35
+          sub_style = f"FontName=Liberation Sans,Fontsize={font_size},PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV={margin_v}"
+
+          subprocess.run([
+              "ffmpeg", "-y",
+              "-i", "video_sem_audio.mp4",
+              "-i", audio_file,
+              "-i", "musica_gerada.mp3",
+              "-filter_complex",
+              f"[0:v]subtitles=legenda.srt:force_style='{sub_style}'[vout];"
+              f"[1:a]volume=1.0[voz];"
+              f"[2:a]volume={music_vol}[bg];"
+              f"[voz][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+              "-map", "[vout]", "-map", "[aout]",
+              "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+              "-c:a", "aac", "-b:a", "192k", "-shortest",
+              "video-historia-pronto.mp4"
+          ], check=True)
+          print("Vídeo finalizado com sucesso!")
+          EOF
+
+      - name: Publicar Vídeo e Legenda em Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: historia-${{ github.run_number }}
+          name: "Vídeo Gerado por IA #${{ github.run_number }}"
+          body: |
+            Vídeo gerado automaticamente a partir da narração!
+            - **Áudio base:** ${{ inputs.arquivo_audio }}
+            - **Estilo das imagens:** ${{ inputs.estilo_imagens }}
+            - **Formato:** ${{ inputs.formato }}
+          files: |
+            video-historia-pronto.mp4
+            legenda.srt
+            musica_gerada.mp3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
