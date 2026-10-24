@@ -1,0 +1,122 @@
+name: Editar Video Completo (Corte + Musica + Legenda)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_entrada:
+        description: 'Nome do vídeo no repositório (ex: entrada.mp4)'
+        required: true
+        default: 'entrada.mp4'
+      musica_fundo:
+        description: 'Arquivo de música no repositório (ex: musica.mp3)'
+        required: true
+        default: 'musica.mp3'
+      volume_musica:
+        description: 'Volume da música de fundo (0.10 = 10%, 0.20 = 20%)'
+        required: true
+        default: '0.15'
+      modo_legenda:
+        description: 'Como aplicar a legenda?'
+        required: true
+        default: 'gerar_automatico_ia'
+        type: choice
+        options:
+          - gerar_automatico_ia
+          - usar_arquivo_srt
+      inicio_corte:
+        description: 'Tempo de início do corte (HH:MM:SS)'
+        required: true
+        default: '00:00:05'
+      fim_corte:
+        description: 'Tempo de fim do corte (HH:MM:SS)'
+        required: true
+        default: '00:00:55'
+      formato:
+        description: 'Formato de saída do vídeo'
+        required: true
+        default: 'vertical_9_16'
+        type: choice
+        options:
+          - vertical_9_16
+          - original_16_9
+
+permissions:
+  contents: write
+
+jobs:
+  processar-video:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar arquivos do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar FFmpeg e fontes para legenda
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-liberation
+
+      - name: Realizar o corte inicial do vídeo
+        run: |
+          # Corta primeiro para que a legenda sincronize a partir do segundo 00:00:00
+          ffmpeg -y -ss "${{ inputs.inicio_corte }}" -to "${{ inputs.fim_corte }}" \
+            -i "${{ inputs.video_entrada }}" \
+            -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k \
+            video_cortado.mp4
+
+      - name: Criar ou preparar legenda sincronizada (.srt)
+        run: |
+          if [ "${{ inputs.modo_legenda }}" = "gerar_automatico_ia" ]; then
+            echo "Instalando Whisper para transcrever e sincronizar o áudio..."
+            pip install -q openai-whisper
+            whisper video_cortado.mp4 --model base --language pt --output_format srt --output_dir .
+            mv video_cortado.srt legenda.srt
+          else
+            if [ ! -f "legenda.srt" ]; then
+              echo "Arquivo legenda.srt não encontrado! Criando legenda padrão..."
+              printf "1\n00:00:00,500 --> 00:00:05,000\nLegenda de exemplo sincronizada\n" > legenda.srt
+            fi
+          fi
+
+      - name: Verificar ou gerar trilha de fundo (musica.mp3)
+        run: |
+          # Se você não tiver subido o arquivo musica.mp3, o FFmpeg cria uma base ambiente suave automaticamente
+          if [ ! -f "${{ inputs.musica_fundo }}" ]; then
+            echo "Arquivo ${{ inputs.musica_fundo }} não encontrado. Gerando fundo musical ambiente..."
+            ffmpeg -y -f lavfi -i "sine=frequency=220:duration=60" \
+              -f lavfi -i "sine=frequency=330:duration=60" \
+              -filter_complex "[0:a][1:a]amix=inputs=2,lowpass=f=400,afade=t=in:ss=0:d=3" \
+              -c:a libmp3lame -q:a 4 "${{ inputs.musica_fundo }}"
+          fi
+
+      - name: Mixar música de fundo e queimar legenda no vídeo
+        run: |
+          if [ "${{ inputs.formato }}" = "vertical_9_16" ]; then
+            VF_FILTER="scale=-1:1920,crop=1080:1920,subtitles=legenda.srt:force_style='FontName=Liberation Sans,Fontsize=16,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=65'"
+          else
+            VF_FILTER="subtitles=legenda.srt:force_style='FontName=Liberation Sans,Fontsize=20,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=30'"
+          fi
+
+          ffmpeg -y -i video_cortado.mp4 -stream_loop -1 -i "${{ inputs.musica_fundo }}" \
+            -filter_complex "[0:v]${VF_FILTER}[vout];[0:a]volume=1.0[voz];[1:a]volume=${{ inputs.volume_musica }}[bg];[voz][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]" \
+            -map "[vout]" -map "[aout]" \
+            -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -shortest \
+            video-pronto.mp4
+
+      - name: Publicar vídeo e arquivo de legenda em Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: video-${{ github.run_number }}
+          name: "Vídeo Editado #${{ github.run_number }}"
+          body: |
+            Vídeo processado automaticamente via FFmpeg + Whisper.
+            - **Arquivo base:** ${{ inputs.video_entrada }}
+            - **Trecho cortado:** ${{ inputs.inicio_corte }} até ${{ inputs.fim_corte }}
+            - **Música de fundo:** ${{ inputs.musica_fundo }} (Volume: ${{ inputs.volume_musica }})
+            - **Modo de legenda:** ${{ inputs.modo_legenda }}
+            - **Formato:** ${{ inputs.formato }}
+          files: |
+            video-pronto.mp4
+            legenda.srt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
