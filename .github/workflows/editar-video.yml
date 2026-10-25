@@ -1,4 +1,4 @@
-name: Gerador de Video IA (Apenas Audio)
+name: Gerador de Video IA Studio (Completo + Marca d'Agua)
 
 on:
   workflow_dispatch:
@@ -7,14 +7,53 @@ on:
         description: 'Nome do arquivo de áudio no repositório (ex: voz.mp3)'
         required: true
         default: 'voz.mp3'
-      estilo_imagens:
-        description: 'Estilo visual das imagens geradas pela IA'
+      texto_marca:
+        description: 'Nome do canal para marca d água (ex: @DicasMotivacionais)'
         required: true
-        default: 'cinematic dark atmospheric illustration, dramatic lighting, ultra detailed, 8k'
+        default: '@DicasMotivacionais'
+      posicao_marca:
+        description: 'Posição da marca d água na tela'
+        required: true
+        default: 'topo_centralizado'
+        type: choice
+        options:
+          - topo_centralizado
+          - topo_canto_direito
+          - rodape_abaixo_legenda
+          - sem_marca
+      modo_estilo:
+        description: 'Estilo visual (auto_adaptar analisa a fala e escolhe sozinho)'
+        required: true
+        default: 'auto_adaptar'
+        type: choice
+        options:
+          - auto_adaptar
+          - motivacional_estoico_dark
+          - cinema_realista_8k
+          - epico_espiritual_dourado
+          - suspense_misterio_sombrio
+          - anime_cinematografico
+      efeito_cinema:
+        description: 'Acabamento de tela (Vinheta escura nas bordas + Partículas/Película)'
+        required: true
+        default: 'vinheta_e_particulas_cinema'
+        type: choice
+        options:
+          - vinheta_e_particulas_cinema
+          - apenas_vinheta_escura
+          - sem_efeito
+      velocidade_zoom:
+        description: 'Intensidade do efeito Ken Burns (Zoom nas imagens)'
+        required: true
+        default: 'suave_profissional'
+        type: choice
+        options:
+          - suave_profissional
+          - dinamico_rapido
       volume_musica:
-        description: 'Volume da música de fundo gerada (0.10 = 10%, 0.15 = 15%)'
+        description: 'Volume máximo da música nas pausas (ex: 0.30 = 30%, cai sozinho na fala)'
         required: true
-        default: '0.15'
+        default: '0.30'
       formato:
         description: 'Formato do vídeo'
         required: true
@@ -41,24 +80,31 @@ jobs:
           sudo apt-get install -y ffmpeg fonts-liberation
           pip install -q openai-whisper requests
 
-      - name: Transcrever áudio, gerar imagens da história, música e vídeo
+      - name: Gerar cenas, Ken Burns, Marca d'Água, Audio Ducking e Legendas
         env:
           AUDIO_INPUT: ${{ inputs.arquivo_audio }}
-          IMAGE_STYLE: ${{ inputs.estilo_imagens }}
+          WATERMARK_TEXT: ${{ inputs.texto_marca }}
+          WATERMARK_POS: ${{ inputs.posicao_marca }}
+          STYLE_MODE: ${{ inputs.modo_estilo }}
+          CINE_EFFECT: ${{ inputs.efeito_cinema }}
+          ZOOM_SPEED: ${{ inputs.velocidade_zoom }}
           MUSIC_VOL: ${{ inputs.volume_musica }}
           VIDEO_FORMAT: ${{ inputs.formato }}
         run: |
           python3 - << 'EOF'
           import os
-          import json
           import subprocess
           import urllib.parse
           import requests
           import whisper
 
           audio_file = os.environ.get("AUDIO_INPUT", "voz.mp3")
-          style = os.environ.get("IMAGE_STYLE", "cinematic dark atmospheric, dramatic lighting")
-          music_vol = os.environ.get("MUSIC_VOL", "0.15")
+          wm_text = os.environ.get("WATERMARK_TEXT", "@SeuCanal").strip()
+          wm_pos = os.environ.get("WATERMARK_POS", "topo_centralizado")
+          style_mode = os.environ.get("STYLE_MODE", "auto_adaptar")
+          cine_effect = os.environ.get("CINE_EFFECT", "vinheta_e_particulas_cinema")
+          zoom_speed = os.environ.get("ZOOM_SPEED", "suave_profissional")
+          music_vol = os.environ.get("MUSIC_VOL", "0.30")
           v_format = os.environ.get("VIDEO_FORMAT", "vertical_9_16")
 
           if not os.path.exists(audio_file):
@@ -71,16 +117,68 @@ jobs:
           total_duration = float(subprocess.check_output(cmd_dur).decode().strip())
           print(f"Duração total do áudio: {total_duration:.2f} segundos")
 
-          # 2. Transcrever o áudio com Whisper para obter os trechos e tempos
+          # 2. Transcrever o áudio com Whisper
           print("Transcrevendo áudio com IA...")
           model = whisper.load_model("base")
           result = model.transcribe(audio_file, language="pt")
+          full_text = result.get("text", "").lower()
           segments = result.get("segments", [])
 
           if not segments:
               segments = [{"start": 0.0, "end": total_duration, "text": "História em andamento"}]
 
-          # 3. Criar o arquivo de legenda sincronizada (legenda.srt)
+          # 3. Banco de estilos visuais e acordes musicais
+          ESTILOS = {
+              "motivacional_estoico_dark": {
+                  "prompt": "dark cinematic stoic aesthetic, dramatic rim lighting, moody shadows, intense atmosphere, ultra detailed photography, 8k, anamorphic lens",
+                  "freqs": [110.0, 164.81, 220.0, 261.63],
+                  "nome": "Motivacional / Estoico Dark"
+              },
+              "epico_espiritual_dourado": {
+                  "prompt": "epic spiritual cinematic painting, volumetric golden god rays, divine atmosphere, oil painting masterpiece, ethereal light, 8k",
+                  "freqs": [130.81, 196.00, 246.94, 329.63],
+                  "nome": "Épico / Espiritual Iluminado"
+              },
+              "suspense_misterio_sombrio": {
+                  "prompt": "dark mystery thriller cinema, volumetric fog, eerie cinematic lighting, tense atmosphere, shadows, hyperrealistic, 8k",
+                  "freqs": [98.00, 146.83, 196.00, 233.08],
+                  "nome": "Suspense / Mistério Sombrio"
+              },
+              "cinema_realista_8k": {
+                  "prompt": "award winning cinematic photography, 35mm lens, photorealistic, natural dramatic lighting, shallow depth of field, 8k",
+                  "freqs": [146.83, 220.00, 293.66, 349.23],
+                  "nome": "Cinema Fotorealista 8K"
+              },
+              "anime_cinematografico": {
+                  "prompt": "makoto shinkai anime movie style, detailed background art, emotional lighting, vibrant cinematic colors, masterpiece, 8k",
+                  "freqs": [130.81, 196.00, 246.94, 329.63],
+                  "nome": "Anime Cinematográfico"
+              }
+          }
+
+          # 4. Detectar automaticamente o tema do vídeo pelo texto narrado
+          estilo_escolhido = style_mode
+          if style_mode == "auto_adaptar":
+              palavras_espiritual = ["deus", "fé", "oração", "senhor", "bíblia", "milagre", "alma", "espírito", "céu", "bênção", "jesus"]
+              palavras_motivacional = ["disciplina", "foco", "vencer", "silêncio", "mente", "sucesso", "força", "dor", "objetivo", "hábito", "lutas", "resiliência"]
+              palavras_misterio = ["medo", "noite", "segredo", "sombra", "mistério", "escuridão", "oculto", "estranho", "perigo"]
+
+              score_esp = sum(1 for p in palavras_espiritual if p in full_text)
+              score_mot = sum(1 for p in palavras_motivacional if p in full_text)
+              score_mis = sum(1 for p in palavras_misterio if p in full_text)
+
+              if score_esp > score_mot and score_esp > score_mis:
+                  estilo_escolhido = "epico_espiritual_dourado"
+              elif score_mis > score_mot and score_mis > score_esp:
+                  estilo_escolhido = "suspense_misterio_sombrio"
+              elif score_mot > 0:
+                  estilo_escolhido = "motivacional_estoico_dark"
+              else:
+                  estilo_escolhido = "cinema_realista_8k"
+
+          config_estilo = ESTILOS.get(estilo_escolhido, ESTILOS["motivacional_estoico_dark"])
+
+          # 5. Criar o arquivo de legenda sincronizada (legenda.srt)
           def format_srt_time(seconds):
               hrs = int(seconds // 3600)
               mins = int((seconds % 3600) // 60)
@@ -95,7 +193,7 @@ jobs:
                   text = seg["text"].strip()
                   srt_file.write(f"{idx}\n{start_t} --> {end_t}\n{text}\n\n")
 
-          # 4. Agrupar trechos muito curtos (mínimo ~4 segundos por cena) para gerar imagens da história
+          # 6. Agrupar trechos (mínimo ~4.5 segundos por cena)
           scenes = []
           current_scene = {"start": 0.0, "end": 0.0, "text": ""}
 
@@ -105,11 +203,10 @@ jobs:
               current_scene["text"] += " " + seg["text"].strip()
               current_scene["end"] = seg["end"]
 
-              if (current_scene["end"] - current_scene["start"] >= 4.0) or (i == len(segments) - 1):
+              if (current_scene["end"] - current_scene["start"] >= 4.5) or (i == len(segments) - 1):
                   scenes.append(current_scene.copy())
                   current_scene = {"start": 0.0, "end": 0.0, "text": ""}
 
-          # Ajustar emendas de tempo para cobrir 100% do áudio sem buracos
           for i in range(len(scenes)):
               if i == 0:
                   scenes[i]["start"] = 0.0
@@ -118,19 +215,35 @@ jobs:
               else:
                   scenes[i]["end"] = total_duration
 
-          # 5. Gerar uma imagem por IA para cada cena da história e transformar em clipe
+          def criar_prompt_visual(frase_pt, base_style):
+              try:
+                  instrucao = f"Describe a single vivid cinematic visual scene (in 18 English words, no text or quotes) representing this narration: {frase_pt}"
+                  url_txt = f"https://text.pollinations.ai/{urllib.parse.quote(instrucao)}"
+                  r = requests.get(url_txt, timeout=15)
+                  if r.status_code == 200 and len(r.text.strip()) > 10:
+                      cena_en = r.text.strip().replace("\n", " ")[:180]
+                      return f"{cena_en}, {base_style}, no text, no letters"
+              except Exception:
+                  pass
+              return f"{frase_pt}, {base_style}, no text, no letters"
+
+          # 7. Gerar imagens e aplicar Efeito Ken Burns
           os.makedirs("cenas", exist_ok=True)
           concat_list = []
+          fps = 25
+          z_step = "0.0018" if zoom_speed == "suave_profissional" else "0.0030"
+          max_z = "1.28" if zoom_speed == "suave_profissional" else "1.40"
 
           for idx, scene in enumerate(scenes):
-              duration = max(0.5, scene["end"] - scene["start"])
-              prompt_text = f"{scene['text'].strip()}, {style}, no text, no words"
-              encoded_prompt = urllib.parse.quote(prompt_text)
-              img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={idx+100}&nologo=true"
+              duration = max(1.0, scene["end"] - scene["start"])
+              frames = int(duration * fps) + 5
+
+              visual_prompt = criar_prompt_visual(scene["text"].strip(), config_estilo["prompt"])
+              encoded_prompt = urllib.parse.quote(visual_prompt)
+              img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={idx+200}&nologo=true"
               img_path = f"cenas/img_{idx:03d}.jpg"
               clip_path = f"cenas/clip_{idx:03d}.mp4"
 
-              print(f"Gerando imagem da cena {idx+1}/{len(scenes)}: {scene['text'].strip()[:50]}...")
               img_downloaded = False
               for tentativa in range(3):
                   try:
@@ -140,62 +253,101 @@ jobs:
                               f.write(resp.content)
                           img_downloaded = True
                           break
-                  except Exception as e:
-                      print(f"Tentativa {tentativa+1} falhou: {e}")
+                  except Exception:
+                      pass
 
-              # Caso o servidor de imagem oscile, gera um quadro escuro cinematográfico de segurança
               if not img_downloaded:
                   subprocess.run([
                       "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x12131a:s={width}x{height}:d=1",
                       "-frames:v", "1", img_path
                   ], check=True)
 
-              # Criar clipe da cena com transição suave (fade-in)
+              if idx % 2 == 0:
+                  zoom_expr = f"min(zoom+{z_step},{max_z})"
+              else:
+                  zoom_expr = f"if(eq(on,1),{max_z},max(1.0,zoom-{z_step}))"
+
+              vf_ken_burns = (
+                  f"scale={width*2}:{height*2}:force_original_aspect_ratio=increase,"
+                  f"crop={width*2}:{height*2},"
+                  f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={width}x{height}:fps={fps},"
+                  f"fade=t=in:st=0:d=0.4,format=yuv420p"
+              )
+
               subprocess.run([
-                  "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+                  "ffmpeg", "-y", "-i", img_path,
+                  "-vf", vf_ken_burns,
                   "-t", f"{duration:.3f}",
-                  "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fade=t=in:st=0:d=0.4,format=yuv420p",
-                  "-r", "25", "-c:v", "libx264", "-preset", "fast", "-crf", "22", clip_path
+                  "-r", str(fps), "-c:v", "libx264", "-preset", "fast", "-crf", "22", clip_path
               ], check=True)
               concat_list.append(f"file '{clip_path}'")
 
           with open("lista_cenas.txt", "w") as f:
               f.write("\n".join(concat_list))
 
-          # 6. Unir todos os clipes de imagem em uma única faixa de vídeo
+          # 8. Unir todos os clipes com Ken Burns
           subprocess.run([
               "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "lista_cenas.txt",
               "-c", "copy", "video_sem_audio.mp4"
           ], check=True)
 
-          # 7. Gerar trilha musical ambiente original automaticamente (Acorde Am7 cinematográfico)
-          print("Compondo trilha musical ambiente original...")
+          # 9. Gerar trilha musical adaptada ao clima da história
+          f1, f2, f3, f4 = config_estilo["freqs"]
           subprocess.run([
               "ffmpeg", "-y",
-              "-f", "lavfi", "-i", f"sine=frequency=110:duration={total_duration}",
-              "-f", "lavfi", "-i", f"sine=frequency=164.81:duration={total_duration}",
-              "-f", "lavfi", "-i", f"sine=frequency=220:duration={total_duration}",
-              "-f", "lavfi", "-i", f"sine=frequency=261.63:duration={total_duration}",
+              "-f", "lavfi", "-i", f"sine=frequency={f1}:duration={total_duration}",
+              "-f", "lavfi", "-i", f"sine=frequency={f2}:duration={total_duration}",
+              "-f", "lavfi", "-i", f"sine=frequency={f3}:duration={total_duration}",
+              "-f", "lavfi", "-i", f"sine=frequency={f4}:duration={total_duration}",
               "-filter_complex", "[0:a][1:a][2:a][3:a]amix=inputs=4,lowpass=f=320,tremolo=f=0.4:d=0.35,aecho=0.8:0.88:60:0.4,afade=t=in:st=0:d=2,afade=t=out:st=" + str(max(0, total_duration-2.5)) + ":d=2.5",
               "-c:a", "libmp3lame", "-q:a", "4", "musica_gerada.mp3"
           ], check=True)
 
-          # 8. Queimar a legenda sincronizada e misturar Narração + Música Gerada
-          print("Renderizando vídeo final com legendas e mixagem de som...")
+          # 10. Configurar Marca d'Água, Vinheta, Legendas e Audio Ducking
           font_size = 16 if v_format == "vertical_9_16" else 20
-          margin_v = 65 if v_format == "vertical_9_16" else 35
+          # Se a marca d'água ficar no rodapé, sobe um pouco a legenda para não encostar
+          if wm_pos == "rodape_abaixo_legenda":
+              margin_v = 85 if v_format == "vertical_9_16" else 50
+          else:
+              margin_v = 65 if v_format == "vertical_9_16" else 35
+
           sub_style = f"FontName=Liberation Sans,Fontsize={font_size},PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV={margin_v}"
+
+          if cine_effect == "vinheta_e_particulas_cinema":
+              cine_filter = "eq=contrast=1.12:brightness=-0.03:saturation=1.15,noise=alls=7:allf=t+u,vignette=PI/4,"
+          elif cine_effect == "apenas_vinheta_escura":
+              cine_filter = "eq=contrast=1.08:brightness=-0.02,vignette=PI/4,"
+          else:
+              cine_filter = ""
+
+          # Montar filtro da marca d'água discreta (45% de opacidade + sombra suave)
+          safe_wm_text = wm_text.replace("'", "").replace(":", " ")
+          font_path = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+          wm_fontsize = 34 if v_format == "vertical_9_16" else 28
+
+          if wm_pos == "topo_centralizado" and safe_wm_text:
+              wm_filter = f"drawtext=fontfile={font_path}:text='{safe_wm_text}':fontcolor=white@0.45:fontsize={wm_fontsize}:shadowcolor=black@0.6:shadowx=2:shadowy=2:x=(w-text_w)/2:y=110,"
+          elif wm_pos == "topo_canto_direito" and safe_wm_text:
+              wm_filter = f"drawtext=fontfile={font_path}:text='{safe_wm_text}':fontcolor=white@0.45:fontsize={wm_fontsize}:shadowcolor=black@0.6:shadowx=2:shadowy=2:x=w-text_w-50:y=110,"
+          elif wm_pos == "rodape_abaixo_legenda" and safe_wm_text:
+              wm_filter = f"drawtext=fontfile={font_path}:text='{safe_wm_text}':fontcolor=white@0.45:fontsize={wm_fontsize}:shadowcolor=black@0.6:shadowx=2:shadowy=2:x=(w-text_w)/2:y=h-text_h-60,"
+          else:
+              wm_filter = ""
+
+          filter_complex = (
+              f"[0:v]{cine_filter}{wm_filter}subtitles=legenda.srt:force_style='{sub_style}'[vout];"
+              f"[1:a]volume=1.0,asplit=2[voz][voz_sc];"
+              f"[2:a]volume={music_vol}[bg];"
+              f"[bg][voz_sc]sidechaincompress=threshold=0.025:ratio=6:attack=45:release=650[bg_duck];"
+              f"[voz][bg_duck]amix=inputs=2:duration=first:dropout_transition=2,volume=1.6[aout]"
+          )
 
           subprocess.run([
               "ffmpeg", "-y",
               "-i", "video_sem_audio.mp4",
               "-i", audio_file,
               "-i", "musica_gerada.mp3",
-              "-filter_complex",
-              f"[0:v]subtitles=legenda.srt:force_style='{sub_style}'[vout];"
-              f"[1:a]volume=1.0[voz];"
-              f"[2:a]volume={music_vol}[bg];"
-              f"[voz][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+              "-filter_complex", filter_complex,
               "-map", "[vout]", "-map", "[aout]",
               "-c:v", "libx264", "-preset", "fast", "-crf", "22",
               "-c:a", "aac", "-b:a", "192k", "-shortest",
@@ -210,9 +362,10 @@ jobs:
           tag_name: historia-${{ github.run_number }}
           name: "Vídeo Gerado por IA #${{ github.run_number }}"
           body: |
-            Vídeo gerado automaticamente a partir da narração!
+            Vídeo gerado automaticamente com Marca d'Água, Ken Burns, Audio Ducking e Cinema!
             - **Áudio base:** ${{ inputs.arquivo_audio }}
-            - **Estilo das imagens:** ${{ inputs.estilo_imagens }}
+            - **Marca d'Água:** ${{ inputs.texto_marca }} (${{ inputs.posicao_marca }})
+            - **Modo de Estilo:** ${{ inputs.modo_estilo }}
             - **Formato:** ${{ inputs.formato }}
           files: |
             video-historia-pronto.mp4
